@@ -1,7 +1,10 @@
 import os
+from typing import Any
 
 from dotenv import load_dotenv
 from langchain import hub
+from langchain_core.tools import Tool
+from langchain_experimental.agents import create_csv_agent
 from langchain_openai import ChatOpenAI
 from langchain.agents import create_react_agent, AgentExecutor
 from langchain_experimental.tools import PythonREPLTool
@@ -22,20 +25,62 @@ def main():
     base_prompt = hub.pull("langchain-ai/react-agent-template")
     prompt = base_prompt.partial(instructions=instructions)
 
-    tools = [PythonREPLTool()]
+    python_agent_tools = [PythonREPLTool()]
     llm = ChatOpenAI(temperature=0, model=os.environ.get("OPENAI_MODEL"))
 
-    agent = create_react_agent(
+    python_agent = create_react_agent(
+        prompt=prompt,
+        llm=llm,
+        tools=python_agent_tools,
+    )
+
+    python_agent_executor = AgentExecutor(agent=python_agent, tools=python_agent_tools, verbose=True)
+
+    # TODO: Run code on local machine to use the whole file as context as it is too large for OpenAI
+    csv_agent_executor: AgentExecutor = create_csv_agent(
+        llm=llm,
+        path="episode_info.csv",
+        agent_type="openai-tools",
+        verbose=True,
+        allow_dangerous_code=True,
+    )
+
+    ### Router Grand Agent ###
+
+    def python_agent_executor_wrapper(original_prompt: str) -> dict[str, Any]:
+        return python_agent_executor.invoke({"input": original_prompt})
+
+    tools = [
+        Tool(
+            name="Python Agent",
+            func=python_agent_executor_wrapper,
+            description="""useful when you need to transform natural language to python and execute the python code,
+                            returning the results of the code execution, no need to import qrcodes or pillow packages,
+                            DOES NOT ACCEPT CODE AS INPUT""",
+        ),
+        Tool(
+            name="CSV Agent",
+            func=csv_agent_executor,
+            description="""useful when you need to answer questions about episode_info.csv file.
+                        takes and input the entire question and returns the answer after running pandas calculations"""
+        ),
+    ]
+
+    prompt = base_prompt.partial(instructions="")
+    grand_agent = create_react_agent(
         prompt=prompt,
         llm=llm,
         tools=tools,
     )
+    grand_agent_executor = AgentExecutor(agent=grand_agent, tools=tools, verbose=True)
 
-    agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
-    agent_executor.invoke(
-        {"input": """Generate and save in current working directory 5 QR-codes in qrcodes directory
-                        that point to www.google.com, you have qrcode package installed already and do not need the pillow package."""}
-    )
+    print(grand_agent_executor.invoke(
+        {"input": "which seasons have 24 episodes?"}
+    ))
+
+    print(grand_agent_executor.invoke(
+        {"input": "generate 3 qr-codes pointing to google.com and save them in de qrcodes folder"}
+    ))
 
 
 if __name__ == "__main__":
